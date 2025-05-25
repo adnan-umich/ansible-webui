@@ -1,0 +1,99 @@
+---
+- name: Setup Open WebUI with Docker and Nginx
+  hosts: all
+  become: true
+  vars:
+    webui_dir: "/home/{{ ansible_user_id }}/webui"
+    webui_secret_key: "{{ lookup('pipe', 'openssl rand -hex 32') }}"
+    nginx_config_path: "/etc/nginx/sites-available/open-webui"
+    webui_port: 3000
+  
+  tasks:
+    - name: Check OS release
+      command: cat /etc/os-release
+      register: os_release
+      changed_when: false
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Upgrade packages
+      apt:
+        upgrade: yes
+
+    - name: Install required packages
+      apt:
+        name:
+          - docker.io
+          - nginx
+          - cronie
+          - iotop
+          - nethogs
+        state: present
+
+    - name: Install Docker Compose
+      apt:
+        name: docker-compose
+        state: present
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user_id }}"
+        groups: docker
+        append: yes
+
+    - name: Enable and start Docker services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - docker.service
+        - containerd.service
+
+    - name: Create WebUI directory
+      file:
+        path: "{{ webui_dir }}"
+        state: directory
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_id }}"
+        mode: '0755'
+
+    - name: Create docker-compose.yaml
+      template:
+        src: templates/docker-compose.yaml.j2
+        dest: "{{ webui_dir }}/docker-compose.yaml"
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_id }}"
+        mode: '0644'
+
+    - name: Start WebUI with Docker Compose
+      community.docker.docker_compose:
+        project_src: "{{ webui_dir }}"
+        state: present
+      become: yes
+      become_user: "{{ ansible_user_id }}"
+
+    - name: Configure Nginx reverse proxy
+      template:
+        src: templates/nginx-config.j2
+        dest: "{{ nginx_config_path }}"
+        mode: '0644'
+
+    - name: Enable Nginx site
+      file:
+        src: "{{ nginx_config_path }}"
+        dest: "/etc/nginx/sites-enabled/open-webui"
+        state: link
+
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_test
+      changed_when: false
+      failed_when: nginx_test.rc != 0
+
+    - name: Restart Nginx
+      systemd:
+        name: nginx
+        state: restarted
